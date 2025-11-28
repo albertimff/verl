@@ -66,7 +66,7 @@ evaluation:
 # Output file paths for evaluation artifacts.
 output:
   path: ./eval_results
-  scores_path: evaluation_scores.parquet
+  scores_path: evaluation_scores.json
   trace_path: evaluation_trace.json
 
 # Minimal trainer section supplying cluster topology.

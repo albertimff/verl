@@ -501,24 +501,63 @@ def aggregate_summary(turn_scores: List[float], generation_times: List[float], r
     }
 
 
-def save_results(records: List[Dict[str, Any]], metrics: Dict[str, Any], config: DictConfig):
+def append_results_to_file(records: List[Dict[str, Any]], scores_path: Path, is_first_batch: bool):
+    """Append records to output file incrementally to avoid memory overflow.
+    
+    Args:
+        records: List of record dictionaries to append
+        scores_path: Path to the output file
+        is_first_batch: Whether this is the first batch (determines write mode)
+    """
+    if not records:
+        return
+    
+    if scores_path.suffix == ".parquet":
+        # For parquet, use pandas append mode
+        df = pd.DataFrame(records)
+        if is_first_batch:
+            df.to_parquet(scores_path, index=False, engine='pyarrow')
+        else:
+            # Append to existing parquet file
+            existing_df = pd.read_parquet(scores_path)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            combined_df.to_parquet(scores_path, index=False, engine='pyarrow')
+    elif scores_path.suffix == ".jsonl":
+        # JSONL format: append line by line (recommended for large datasets)
+        mode = 'w' if is_first_batch else 'a'
+        with open(scores_path, mode, encoding='utf-8') as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    else:
+        # JSON format: append to array (less efficient for large files)
+        if is_first_batch:
+            with open(scores_path, 'w', encoding='utf-8') as f:
+                json.dump(records, f, indent=2, ensure_ascii=False)
+        else:
+            # Read existing, append, and write back
+            with open(scores_path, 'r', encoding='utf-8') as f:
+                existing_records = json.load(f)
+            existing_records.extend(records)
+            with open(scores_path, 'w', encoding='utf-8') as f:
+                json.dump(existing_records, f, indent=2, ensure_ascii=False)
+
+
+def save_summary_and_trace(metrics: Dict[str, Any], trace_records: List[Dict[str, Any]], config: DictConfig):
+    """Save evaluation summary and trace (sample records) at the end of evaluation.
+    
+    Args:
+        metrics: Summary metrics dictionary
+        trace_records: Sample records for trace (first 100)
+        config: Configuration object
+    """
     output_dir = Path(config.output.path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if records and config.output.get("scores_path"):
-        scores_path = output_dir / config.output.scores_path
-        df = pd.DataFrame(records)
-        if scores_path.suffix == ".parquet":
-            df.to_parquet(scores_path, index=False)
-        else:
-            df.to_json(scores_path, orient="records", indent=2, force_ascii=False)
-        logger.info("Saved detailed scores to %s", scores_path)
-
-    if config.output.get("trace_path"):
+    if config.output.get("trace_path") and trace_records:
         trace_path = output_dir / config.output.trace_path
         trace_payload = {
             "config": OmegaConf.to_container(config, resolve=True),
-            "records": records[: min(100, len(records))],
+            "records": trace_records,
         }
         with open(trace_path, "w", encoding="utf-8") as f:
             json.dump(trace_payload, f, indent=2, ensure_ascii=False)
@@ -553,11 +592,23 @@ def run_multiturn_evaluation(config: DictConfig):
     max_batches = eval_cfg.get("max_batches")
     max_samples = eval_cfg.get("max_samples")
 
-    records: List[Dict[str, Any]] = []
+    # Prepare output paths
+    output_dir = Path(config.output.path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scores_path = None
+    if config.output.get("scores_path"):
+        scores_path = output_dir / config.output.scores_path
+        # Remove existing file if present
+        if scores_path.exists():
+            scores_path.unlink()
+            logger.info("Removed existing scores file: %s", scores_path)
+
+    # Keep only metrics in memory, not full records
     turn_scores: List[float] = []
     generation_times: List[float] = []
     reward_times: List[float] = []
-
+    trace_records: List[Dict[str, Any]] = []  # Keep first 100 for trace
+    
     consumed_samples = 0
     progress = tqdm(total=len(dataloader), desc="Batches", disable=len(dataloader) == 0)
 
@@ -568,7 +619,7 @@ def run_multiturn_evaluation(config: DictConfig):
 
             batch = DataProto.from_single_dict(batch_dict)
             ensure_batch_uids(batch)
-            breakpoint()
+            
             generation_output, generation_time = run_generation_step(
                 agent_handle=agent_handle,
                 actor_rollout_wg=actor_rollout_wg,
@@ -592,7 +643,19 @@ def run_multiturn_evaluation(config: DictConfig):
                 rollout_metrics=generation_output.meta_info.get("metrics"),
                 tokenizer=tokenizer,
             )
-            records.extend(sample_records)
+            
+            # Write results incrementally to avoid memory overflow
+            if scores_path:
+                is_first_batch = (batch_idx == 0)
+                append_results_to_file(sample_records, scores_path, is_first_batch)
+                if is_first_batch:
+                    logger.info("Started writing results to %s", scores_path)
+            
+            # Keep first 100 records for trace
+            if len(trace_records) < 100:
+                trace_records.extend(sample_records[:100 - len(trace_records)])
+            
+            # Only keep metrics in memory
             turn_scores.extend(scores)
             generation_times.extend([per_sample_gen_time] * len(scores))
             reward_times.extend([per_sample_reward_time] * len(scores))
@@ -604,8 +667,11 @@ def run_multiturn_evaluation(config: DictConfig):
     finally:
         progress.close()
 
+    if scores_path:
+        logger.info("Finished writing all results to %s", scores_path)
+
     summary_metrics = aggregate_summary(turn_scores, generation_times, reward_times)
-    save_results(records, summary_metrics, config)
+    save_summary_and_trace(summary_metrics, trace_records, config)
     logger.info("Multi-turn evaluation completed!")
     logger.info("Summary metrics: %s", json.dumps(summary_metrics, indent=2))
 
