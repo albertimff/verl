@@ -50,6 +50,7 @@ def main(config: DictConfig):
 def initialize_ray_cluster(config: DictConfig):
     """Initialize Ray with the same runtime env defaults used during training."""
     if ray.is_initialized():
+        logger.info("Ray is already initialized, skipping initialization")
         return
 
     ray_kwargs = config.get("ray_kwargs", {}) or {}
@@ -58,8 +59,28 @@ def initialize_ray_cluster(config: DictConfig):
     default_runtime_env = get_ppo_ray_runtime_env()
     runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_cfg)
     ray_init_with_env = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-    ray.init(**OmegaConf.to_container(ray_init_with_env))
-    logger.info("Initialized Ray cluster with config: %s", ray_init_with_env)
+    ray_init_dict = OmegaConf.to_container(ray_init_with_env, resolve=True)
+    print(f"ray init dict: {ray_init_dict}")
+
+    # Check if we're connecting to an existing cluster and remove resource specifications
+    # to avoid conflicts when connecting to existing Ray clusters
+    try:
+        ray.init(**ray_init_dict)
+    except:
+        _remove_num_resources(ray_init_dict)
+        logger.info(
+            "Connecting to existing Ray cluster detected, removing num_cpus/num_gpus from init parameters"
+        )
+        print(f"ray init dict: {ray_init_dict}")
+        ray.init(**ray_init_dict)
+
+    logger.info("Initialized Ray cluster with config: %s", ray_init_dict)
+
+
+def _remove_num_resources(ray_init_dict: Dict[str, Any]) -> None:
+    """Remove num_cpus and num_gpus from the init dict when connecting to another Ray cluster."""
+    for key in ("num_cpus", "num_gpus"):
+        ray_init_dict.pop(key, None)
 
 
 def load_tokenizer_and_processor(config: DictConfig):
@@ -547,7 +568,7 @@ def run_multiturn_evaluation(config: DictConfig):
 
             batch = DataProto.from_single_dict(batch_dict)
             ensure_batch_uids(batch)
-
+            breakpoint()
             generation_output, generation_time = run_generation_step(
                 agent_handle=agent_handle,
                 actor_rollout_wg=actor_rollout_wg,

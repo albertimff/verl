@@ -13,10 +13,21 @@ _target_: verl.trainer.main_multiturn_eval.run_multiturn_evaluation
 # Actor/rollout configuration tweaks for evaluation.
 actor_rollout_ref:
   hybrid_engine: true
+  actor:
+    ppo_mini_batch_size: 256
+    # This parameter is required for validation but not used during evaluation.
+    ppo_micro_batch_size_per_gpu: 32
+    # This parameter is required for validation but not used during evaluation.
+    ppo_infer_micro_batch_size_per_gpu: 32
+    # This parameter is required for validation but not used during evaluation.
+    ppo_max_token_len_per_gpu: 16384
+    # This parameter is required for validation but not used during evaluation.
+    ppo_infer_max_token_len_per_gpu: 16384
+    # This parameter is required for validation but not used during evaluation.
 
   rollout:
     mode: async
-    name: sglang
+    name: vllm
 
     multi_turn:
       enable: true
