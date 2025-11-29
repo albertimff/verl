@@ -265,7 +265,7 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
             for worker in actor_rollout_wg.workers
         ]
     )
-    logger.info("DeviceMesh patch/register results: %s", patch_results)
+    logger.warning("DeviceMesh patch/register results: %s", patch_results)
 
 
 def prepare_generation_batch(batch: DataProto, async_mode: bool) -> DataProto:
@@ -346,7 +346,16 @@ def load_checkpoint_if_needed(config: DictConfig, actor_rollout_wg: RayWorkerGro
     
     # Load checkpoint (del_local_after_load=False for evaluation)
     logger.info(f"Loading actor checkpoint from: {actor_path}")
-    actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=False)
+    try:
+        actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=False)
+    except RuntimeError as e:
+        # Torch 2.8 FSDP may fail if named process groups were not registered.
+        if "process group" in str(e) and "fsdp" in str(e).lower():
+            logger.warning("Checkpoint load hit process group error, retrying after registering device mesh groups.")
+            _patch_device_mesh_on_workers(actor_rollout_wg)
+            actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=False)
+        else:
+            raise
     logger.info("Checkpoint loaded successfully")
 
 
