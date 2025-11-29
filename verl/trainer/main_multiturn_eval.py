@@ -193,7 +193,7 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
         return
 
     def _register_device_mesh_process_groups(worker_container):
-        """Register named process groups for each DeviceMesh dimension if missing."""
+        """Register simple named process groups (fsdp/ddp/sp etc.) to default WORLD group."""
         try:
             import torch.distributed as dist
             from torch.distributed.distributed_c10d import _get_group_size_by_name, _register_process_group
@@ -215,12 +215,10 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
             for mesh in meshes:
                 if mesh is None:
                     continue
-                # Ensure mesh exposes dim names (patched earlier)
                 names = getattr(mesh, "mesh_dim_names", None) or getattr(mesh, "_dim_group_names", None)
-                if names is None:
-                    names = [None] * getattr(mesh, "ndim", 0)
-                for idx in range(getattr(mesh, "ndim", len(names))):
-                    name = names[idx] if idx < len(names) else None
+                if not names:
+                    names = ["fsdp"]
+                for name in names:
                     if not name:
                         continue
                     try:
@@ -229,19 +227,8 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
                         continue
                     except Exception:
                         pass
-                    pg = None
                     try:
-                        if hasattr(mesh, "get_dim_group"):
-                            pg = mesh.get_dim_group(mesh_dim=idx)
-                        elif hasattr(mesh, "get_group"):
-                            pg = mesh.get_group(mesh_dim=idx)
-                    except Exception as e:  # pragma: no cover - defensive
-                        results.append(f"error:get_dim_group:{name}:{e}")
-                    if pg is None:
-                        # Fallback: use default process group (common case for 1D fsdp mesh).
-                        pg = dist.group.WORLD
-                    try:
-                        _register_process_group(name, pg)
+                        _register_process_group(name, dist.group.WORLD)
                         results.append(f"registered:{name}")
                     except Exception as e:  # pragma: no cover - defensive
                         results.append(f"error:register:{name}:{e}")
