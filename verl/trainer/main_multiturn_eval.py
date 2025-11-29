@@ -151,6 +151,56 @@ def ensure_batch_uids(batch: DataProto):
         )
 
 
+def _maybe_patch_device_mesh() -> str:
+    """
+    Torch 2.8.0 DeviceMesh does not expose `_dim_group_names`, but
+    FSDP2 sharded load path in torch.distributed assumes it exists.
+    Add a lightweight compatibility property so checkpoint loading
+    does not crash on AttributeError.
+    """
+    try:
+        from torch.distributed.device_mesh import DeviceMesh
+    except Exception as e:  # pragma: no cover - defensive
+        return f"skip:torch_import_failed:{e}"
+
+    if hasattr(DeviceMesh, "_dim_group_names"):
+        return "skip:already_patched"
+
+    def _dim_group_names(self):
+        infos = getattr(self, "_dim_group_infos", None)
+        if infos is not None:
+            names = []
+            for idx, info in enumerate(infos):
+                name = getattr(info, "name", None)
+                if name is None:
+                    mesh_dims = getattr(self, "mesh_dim_names", None)
+                    name = mesh_dims[idx] if mesh_dims and idx < len(mesh_dims) else None
+                names.append(name)
+            return names
+
+        mesh_dims = getattr(self, "mesh_dim_names", None)
+        return list(mesh_dims) if mesh_dims is not None else []
+
+    DeviceMesh._dim_group_names = property(_dim_group_names)
+    return "patched"
+
+
+def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
+    """Apply the DeviceMesh compatibility patch inside all rollout workers."""
+    try:
+        import ray
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    patch_results = ray.get(
+        [
+            worker.__ray_call__.remote(lambda self: _maybe_patch_device_mesh())  # type: ignore[misc]
+            for worker in actor_rollout_wg.workers
+        ]
+    )
+    logger.info("DeviceMesh patch results: %s", patch_results)
+
+
 def prepare_generation_batch(batch: DataProto, async_mode: bool) -> DataProto:
     """Subset the batch to the tensors required by rollout workers."""
     reward_model_keys = {"data_source", "reward_model", "extra_info", "uid"}
@@ -578,7 +628,11 @@ def run_multiturn_evaluation(config: DictConfig):
     tokenizer, processor = load_tokenizer_and_processor(config)
     _, dataloader = create_eval_dataloader(config, tokenizer, processor)
     agent_handle, actor_rollout_wg, reward_wg = initialize_worker_groups(config)
-    
+
+    # Patch DeviceMesh on workers to avoid torch 2.8.0 AttributeError when loading FSDP2 sharded checkpoints.
+    _patch_device_mesh_on_workers(actor_rollout_wg)
+    _maybe_patch_device_mesh()
+
     # Load checkpoint if checkpoint_dir is specified
     # Note: checkpoint_dir and model.path are NOT mutually exclusive:
     # - model.path is still needed for tokenizer/processor loading
