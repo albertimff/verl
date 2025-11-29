@@ -229,17 +229,17 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
                         continue
                     except Exception:
                         pass
+                    pg = None
                     try:
                         if hasattr(mesh, "get_dim_group"):
                             pg = mesh.get_dim_group(mesh_dim=idx)
                         elif hasattr(mesh, "get_group"):
                             pg = mesh.get_group(mesh_dim=idx)
-                        else:
-                            results.append(f"skip:no_get_dim_group:{name}")
-                            continue
                     except Exception as e:  # pragma: no cover - defensive
                         results.append(f"error:get_dim_group:{name}:{e}")
-                        continue
+                    if pg is None:
+                        # Fallback: use default process group (common case for 1D fsdp mesh).
+                        pg = dist.group.WORLD
                     try:
                         _register_process_group(name, pg)
                         results.append(f"registered:{name}")
