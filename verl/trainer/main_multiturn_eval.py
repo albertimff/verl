@@ -192,13 +192,80 @@ def _patch_device_mesh_on_workers(actor_rollout_wg: RayWorkerGroup):
     except Exception:  # pragma: no cover - defensive
         return
 
+    def _register_device_mesh_process_groups(worker_container):
+        """Register named process groups for each DeviceMesh dimension if missing."""
+        try:
+            import torch.distributed as dist
+            from torch.distributed.distributed_c10d import _get_group_size_by_name, _register_process_group
+        except Exception as e:  # pragma: no cover - defensive
+            return [f"skip:dist_import_failed:{e}"]
+
+        if not dist.is_initialized():
+            return ["skip:dist_not_initialized"]
+
+        def _register_for_worker(worker):
+            results = []
+            meshes = []
+            if hasattr(worker, "device_mesh"):
+                meshes.append(getattr(worker, "device_mesh"))
+            ulysses_mesh = getattr(worker, "ulysses_device_mesh", None)
+            if ulysses_mesh is not None:
+                meshes.append(ulysses_mesh)
+
+            for mesh in meshes:
+                if mesh is None:
+                    continue
+                # Ensure mesh exposes dim names (patched earlier)
+                names = getattr(mesh, "mesh_dim_names", None) or getattr(mesh, "_dim_group_names", None)
+                if names is None:
+                    names = [None] * getattr(mesh, "ndim", 0)
+                for idx in range(getattr(mesh, "ndim", len(names))):
+                    name = names[idx] if idx < len(names) else None
+                    if not name:
+                        continue
+                    try:
+                        _get_group_size_by_name(name)
+                        results.append(f"skip:exists:{name}")
+                        continue
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(mesh, "get_dim_group"):
+                            pg = mesh.get_dim_group(mesh_dim=idx)
+                        elif hasattr(mesh, "get_group"):
+                            pg = mesh.get_group(mesh_dim=idx)
+                        else:
+                            results.append(f"skip:no_get_dim_group:{name}")
+                            continue
+                    except Exception as e:  # pragma: no cover - defensive
+                        results.append(f"error:get_dim_group:{name}:{e}")
+                        continue
+                    try:
+                        _register_process_group(name, pg)
+                        results.append(f"registered:{name}")
+                    except Exception as e:  # pragma: no cover - defensive
+                        results.append(f"error:register:{name}:{e}")
+            return results
+
+        if hasattr(worker_container, "worker_dict"):
+            all_results = []
+            for sub_worker in worker_container.worker_dict.values():
+                all_results.extend(_register_for_worker(sub_worker))
+            return all_results
+        return _register_for_worker(worker_container)
+
+    def _patch_and_register(worker_container):
+        patch_status = _maybe_patch_device_mesh()
+        register_result = _register_device_mesh_process_groups(worker_container)
+        return {"patch": patch_status, "register": register_result}
+
     patch_results = ray.get(
         [
-            worker.__ray_call__.remote(lambda self: _maybe_patch_device_mesh())  # type: ignore[misc]
+            worker.__ray_call__.remote(lambda self: _patch_and_register(self))  # type: ignore[misc]
             for worker in actor_rollout_wg.workers
         ]
     )
-    logger.info("DeviceMesh patch results: %s", patch_results)
+    logger.info("DeviceMesh patch/register results: %s", patch_results)
 
 
 def prepare_generation_batch(batch: DataProto, async_mode: bool) -> DataProto:
