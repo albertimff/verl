@@ -174,9 +174,6 @@ def _patch_gather_object_for_single_rank() -> str:
     if not dist.is_available():
         return "skip:dist_unavailable"
 
-    if getattr(dist.gather_object, "_verl_single_rank_patched", False):
-        return "skip:already_patched"
-
     orig_gather_object = dist.gather_object
 
     def safe_gather_object(obj, object_gather_list=None, *, dst=0, group=None, async_op=False):
@@ -210,7 +207,7 @@ def _patch_gather_object_for_single_rank() -> str:
 
     safe_gather_object._verl_single_rank_patched = True  # type: ignore[attr-defined]
     dist.gather_object = safe_gather_object  # type: ignore[assignment]
-    return "patched"
+    return "patched:forced"
 
 
 def _patch_gather_object_on_workers(actor_rollout_wg: RayWorkerGroup):
