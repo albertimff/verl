@@ -568,6 +568,9 @@ def run_generation_step(
     tokenizer,
     config: DictConfig,
 ) -> tuple[DataProto, float]:
+    # Re-apply gather_object patch on workers in case backend code reset it.
+    _patch_gather_object_on_workers(actor_rollout_wg)
+
     async_mode = isinstance(agent_handle, AgentLoopManager)
     gen_batch = prepare_generation_batch(batch, async_mode)
     gen_batch.meta_info["eos_token_id"] = tokenizer.eos_token_id
