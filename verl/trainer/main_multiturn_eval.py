@@ -166,8 +166,10 @@ def ensure_batch_uids(batch: DataProto):
 
 def _patch_gather_object_for_single_rank() -> str:
     """
-    Patch torch.distributed.gather_object so dst rank always has a gather_list,
-    even when the group/world_size is 1. PyTorch requires gather_list on dst.
+    Force torch.distributed.gather_object to be tolerant:
+      - dst rank always gets a gather_list if missing
+      - works whether orig supports async_op or not
+    This is applied locally and also pushed into rollout workers.
     """
     if not dist.is_available():
         return "skip:dist_unavailable"
@@ -179,7 +181,10 @@ def _patch_gather_object_for_single_rank() -> str:
 
     def safe_gather_object(obj, object_gather_list=None, *, dst=0, group=None, async_op=False):
         if not dist.is_initialized():
-            return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+            try:
+                return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+            except TypeError:
+                return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
 
         if group is None:
             group = dist.group.WORLD
@@ -193,6 +198,7 @@ def _patch_gather_object_for_single_rank() -> str:
             except TypeError:
                 return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
 
+        # Always prepare gather_list on dst rank (any world size).
         if rank == dst and object_gather_list is None:
             object_gather_list = [None for _ in range(world_size)]
 
