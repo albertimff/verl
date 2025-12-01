@@ -91,18 +91,23 @@ run_case() {
 }
 
 # Text cases
-run_case "text_async_vllm_tp1"  "async" "vllm"   1 "text"
-run_case "text_async_vllm_tp2"  "async" "vllm"   2 "text"
 run_case "text_async_sgl_tp1"   "async" "sglang" 1 "text"
 run_case "text_async_sgl_tp2"   "async" "sglang" 2 "text"
-run_case "text_sync_sgl_tp1"    "sync"  "sglang" 1 "text"
-run_case "text_sync_sgl_tp2"    "sync"  "sglang" 2 "text"
+run_case "text_async_vllm_tp1"  "async" "vllm"   1 "text"
+run_case "text_async_vllm_tp2"  "async" "vllm"   2 "text"
+
+
 
 # Multimodal cases
-run_case "mm_async_vllm_tp1"  "async" "vllm"   1 "mm"
-run_case "mm_async_vllm_tp2"  "async" "vllm"   2 "mm"
 run_case "mm_async_sgl_tp1"   "async" "sglang" 1 "mm"
 run_case "mm_async_sgl_tp2"   "async" "sglang" 2 "mm"
+run_case "mm_async_vllm_tp1"  "async" "vllm"   1 "mm"
+run_case "mm_async_vllm_tp2"  "async" "vllm"   2 "mm"
+
+
+# Sync cases
+run_case "text_sync_sgl_tp1"    "sync"  "sglang" 1 "text"
+run_case "text_sync_sgl_tp2"    "sync"  "sglang" 2 "text"
 run_case "mm_sync_sgl_tp1"    "sync"  "sglang" 1 "mm"
 run_case "mm_sync_sgl_tp2"    "sync"  "sglang" 2 "mm"
 

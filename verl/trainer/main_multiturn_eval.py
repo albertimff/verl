@@ -188,12 +188,19 @@ def _patch_gather_object_for_single_rank() -> str:
             rank = dist.get_rank(group)
             world_size = dist.get_world_size(group)
         except Exception:
-            return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+            try:
+                return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+            except TypeError:
+                return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
 
         if rank == dst and object_gather_list is None:
             object_gather_list = [None for _ in range(world_size)]
 
-        return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+        try:
+            return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+        except TypeError:
+            # Fallback for implementations that do not take async_op.
+            return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
 
     safe_gather_object._verl_single_rank_patched = True  # type: ignore[attr-defined]
     dist.gather_object = safe_gather_object  # type: ignore[assignment]
