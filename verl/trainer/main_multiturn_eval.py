@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import ray
 from omegaconf import DictConfig, OmegaConf
+import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
@@ -161,6 +162,53 @@ def ensure_batch_uids(batch: DataProto):
             [str(uuid.uuid4()) for _ in range(len(batch.batch))],
             dtype=object,
         )
+
+
+def _patch_gather_object_for_single_rank() -> str:
+    """
+    Patch torch.distributed.gather_object so dst rank always has a gather_list,
+    even when the group/world_size is 1. PyTorch requires gather_list on dst.
+    """
+    if not dist.is_available():
+        return "skip:dist_unavailable"
+
+    if getattr(dist.gather_object, "_verl_single_rank_patched", False):
+        return "skip:already_patched"
+
+    orig_gather_object = dist.gather_object
+
+    def safe_gather_object(obj, object_gather_list=None, *, dst=0, group=None, async_op=False):
+        if not dist.is_initialized():
+            return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+
+        if group is None:
+            group = dist.group.WORLD
+
+        try:
+            rank = dist.get_rank(group)
+            world_size = dist.get_world_size(group)
+        except Exception:
+            return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+
+        if rank == dst and object_gather_list is None:
+            object_gather_list = [None for _ in range(world_size)]
+
+        return orig_gather_object(obj, object_gather_list, dst=dst, group=group, async_op=async_op)
+
+    safe_gather_object._verl_single_rank_patched = True  # type: ignore[attr-defined]
+    dist.gather_object = safe_gather_object  # type: ignore[assignment]
+    return "patched"
+
+
+def _patch_gather_object_on_workers(actor_rollout_wg: RayWorkerGroup):
+    """Apply the gather_object patch inside rollout workers."""
+    patch_results = ray.get(
+        [
+            worker.__ray_call__.remote(lambda self: _patch_gather_object_for_single_rank())  # type: ignore[misc]
+            for worker in actor_rollout_wg.workers
+        ]
+    )
+    logger.warning("gather_object patch results: %s", patch_results)
 
 
 def _maybe_patch_device_mesh() -> str:
@@ -763,6 +811,11 @@ def run_multiturn_evaluation(config: DictConfig):
     tokenizer, processor = load_tokenizer_and_processor(config)
     _, dataloader = create_eval_dataloader(config, tokenizer, processor)
     agent_handle, actor_rollout_wg, reward_wg = initialize_worker_groups(config)
+
+    # Ensure gather_object is safe when tp/world_size=1 (dst rank needs gather_list).
+    gather_patch_status = _patch_gather_object_for_single_rank()
+    logger.warning("gather_object patch status (driver): %s", gather_patch_status)
+    _patch_gather_object_on_workers(actor_rollout_wg)
 
     # Backend-specific distributed patches (e.g., sglang needs DeviceMesh group registration)
     _apply_rollout_backend_patches(config, actor_rollout_wg)

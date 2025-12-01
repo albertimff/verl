@@ -91,37 +91,6 @@ except ImportError:
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-_GATHER_OBJECT_PATCHED = False
-
-
-def _patch_gather_object_for_tp1():
-    """Make dist.gather_object tolerant when dst rank forgets gather_list (tp=1 cases)."""
-    global _GATHER_OBJECT_PATCHED
-    if _GATHER_OBJECT_PATCHED:
-        return
-
-    orig_gather_object = dist.gather_object
-
-    def gather_object_safe(obj, object_gather_list=None, dst=0, group=dist.group.WORLD):
-        try:
-            group_world_size = dist.get_world_size(group)
-            group_rank = dist.get_rank(group)
-        except Exception:
-            # Fallback if group metadata is unavailable.
-            return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
-
-        # Only patch for singleton groups (tp/world_size==1).
-        if group_world_size == 1 and object_gather_list is None and group_rank == dst:
-            object_gather_list = [None for _ in range(group_world_size)]
-
-        return orig_gather_object(obj, object_gather_list, dst=dst, group=group)
-
-    dist.gather_object = gather_object_safe
-    _GATHER_OBJECT_PATCHED = True
-
-
-_patch_gather_object_for_tp1()
-
 
 # patch to avoid issue https://github.com/sgl-project/sglang/issues/6723
 def _set_envs_and_config(server_args: ServerArgs):
